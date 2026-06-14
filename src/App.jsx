@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
-const API = '/api';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL
+  ? `${process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '')}/api`
+  : '/api';
 
 const employeeNav = [
   { id: 'dashboard', icon: 'D', label: 'Dashboard' },
@@ -34,7 +36,7 @@ function initials(name = '') {
 
 function createApi(token) {
   return async function api(path, options = {}) {
-    const response = await fetch(API + path, {
+    const response = await fetch(API_BASE + path, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -42,6 +44,10 @@ function createApi(token) {
         ...options.headers,
       },
     });
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('API is not available. Deploy the Express backend and set NEXT_PUBLIC_API_URL in Vercel.');
+    }
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Request failed');
     return data;

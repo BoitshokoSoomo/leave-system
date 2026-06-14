@@ -68,6 +68,18 @@ npm start
 
 Run the Express API separately with `npm run server`. During local development, Next.js proxies `/api/*` requests to `http://localhost:3001/api/*`.
 
+## Deployment Notes
+
+Deploy the Next.js frontend on Vercel and the Express API on a backend host such as Render or Railway.
+
+After the backend is deployed, add this environment variable in Vercel:
+
+```text
+NEXT_PUBLIC_API_URL=https://your-backend-url.onrender.com
+```
+
+For local development you can leave it unset because Next.js rewrites `/api/*` to `http://localhost:3001/api/*`.
+
 ## Demo Credentials
 
 | Role     | Email               | Password    |

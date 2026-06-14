@@ -2,79 +2,85 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const fs = require('fs');
 const path = require('path');
+const { query, withTransaction } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'leave_system_secret_2026';
-const DB_FILE = path.join(__dirname, 'db.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(PUBLIC_DIR));
 
-// ─── DATABASE HELPERS ────────────────────────────────────────────
-function readDB() {
-  if (!fs.existsSync(DB_FILE)) return initDB();
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+app.get('/', (req, res) => {
+  res.json({ name: 'LeaveFlow API', status: 'ok' });
+});
+
+app.get('/api/health', async (req, res) => {
+  await query('SELECT 1');
+  res.json({ status: 'ok' });
+});
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
 }
 
-function writeDB(data) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+function parseLeaveBalance(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
 }
 
-function initDB() {
-  const data = {
-    users: [
-      {
-        id: 1, name: 'Sarah Mokoena', email: 'manager@company.com',
-        password: bcrypt.hashSync('manager123', 10),
-        role: 'manager', department: 'IT'
-      },
-      {
-        id: 2, name: 'Boitshoko Soomo', email: 'employee@company.com',
-        password: bcrypt.hashSync('employee123', 10),
-        role: 'employee', department: 'IT', managerId: 1
-      },
-      {
-        id: 3, name: 'Thabo Nkosi', email: 'thabo@company.com',
-        password: bcrypt.hashSync('employee123', 10),
-        role: 'employee', department: 'IT', managerId: 1
-      },
-      {
-        id: 4, name: 'Lerato Dlamini', email: 'lerato@company.com',
-        password: bcrypt.hashSync('employee123', 10),
-        role: 'employee', department: 'IT', managerId: 1
-      }
-    ],
-    leaveBalances: [
-      { userId: 2, annual: 15, sick: 10, family: 3 },
-      { userId: 3, annual: 15, sick: 10, family: 3 },
-      { userId: 4, annual: 15, sick: 10, family: 3 },
-    ],
-    leaveRequests: [
-      {
-        id: 1, userId: 3, type: 'annual', startDate: '2026-06-01',
-        endDate: '2026-06-03', days: 3, reason: 'Family vacation',
-        status: 'approved', createdAt: '2026-05-20', managerId: 1,
-        managerComment: 'Approved. Enjoy!'
-      },
-      {
-        id: 2, userId: 4, type: 'sick', startDate: '2026-06-10',
-        endDate: '2026-06-10', days: 1, reason: 'Doctor appointment',
-        status: 'pending', createdAt: '2026-06-09', managerId: 1,
-        managerComment: ''
-      }
-    ],
-    nextIds: { user: 5, request: 3 }
+function toUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role,
+    department: row.department,
+    managerId: row.manager_id,
   };
-  writeDB(data);
-  return data;
 }
 
-// ─── MIDDLEWARE ───────────────────────────────────────────────────
+function toBalance(row) {
+  return {
+    userId: row?.user_id,
+    annual: row?.annual ?? 0,
+    sick: row?.sick ?? 0,
+    family: row?.family ?? 0,
+  };
+}
+
+function toLeave(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    type: row.type,
+    startDate: row.start_date?.toISOString?.().split('T')[0] || row.start_date,
+    endDate: row.end_date?.toISOString?.().split('T')[0] || row.end_date,
+    days: row.days,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.created_at?.toISOString?.().split('T')[0] || row.created_at,
+    managerId: row.manager_id,
+    managerComment: row.manager_comment || '',
+    employeeName: row.employee_name,
+    department: row.department,
+  };
+}
+
+function asyncRoute(handler) {
+  return async (req, res, next) => {
+    try {
+      await handler(req, res, next);
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
@@ -91,253 +97,362 @@ function managerOnly(req, res, next) {
   next();
 }
 
-function normalizeEmail(email) {
-  return String(email || '').trim().toLowerCase();
-}
-
-function parseLeaveBalance(value, fallback = 0) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
-}
-
-// ─── AUTH ROUTES ──────────────────────────────────────────────────
-app.post('/api/login', (req, res) => {
+app.post('/api/login', asyncRoute(async (req, res) => {
   const { email, password } = req.body;
-  const db = readDB();
-  const user = db.users.find(u => u.email === email);
-  if (!user || !bcrypt.compareSync(password, user.password))
+  const result = await query('SELECT * FROM users WHERE email = $1', [normalizeEmail(email)]);
+  const user = result.rows[0];
+
+  if (!user || !bcrypt.compareSync(password, user.password)) {
     return res.status(401).json({ error: 'Invalid email or password' });
+  }
+
   const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
-  res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, department: user.department } });
-});
+  res.json({ token, user: toUser(user) });
+}));
 
-// ─── USER ROUTES ──────────────────────────────────────────────────
-app.get('/api/me', auth, (req, res) => {
-  const db = readDB();
-  const user = db.users.find(u => u.id === req.user.id);
-  const balance = db.leaveBalances.find(b => b.userId === req.user.id) || { annual: 0, sick: 0, family: 0 };
-  res.json({ ...user, password: undefined, balance });
-});
+app.get('/api/me', auth, asyncRoute(async (req, res) => {
+  const userResult = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+  const user = userResult.rows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
 
-app.get('/api/employees', auth, managerOnly, (req, res) => {
-  const db = readDB();
-  const employees = db.users
-    .filter(u => u.role === 'employee' && u.managerId === req.user.id)
-    .map(u => {
-      const balance = db.leaveBalances.find(b => b.userId === u.id) || { annual: 0, sick: 0, family: 0 };
-      return { ...u, password: undefined, balance };
-    });
-  res.json(employees);
-});
+  const balanceResult = await query('SELECT * FROM leave_balances WHERE user_id = $1', [req.user.id]);
+  res.json({ ...toUser(user), balance: toBalance(balanceResult.rows[0]) });
+}));
 
-app.post('/api/employees', auth, managerOnly, (req, res) => {
+app.get('/api/employees', auth, managerOnly, asyncRoute(async (req, res) => {
+  const result = await query(
+    `SELECT u.*, b.user_id, b.annual, b.sick, b.family
+     FROM users u
+     LEFT JOIN leave_balances b ON b.user_id = u.id
+     WHERE u.role = 'employee' AND u.manager_id = $1
+     ORDER BY u.name`,
+    [req.user.id]
+  );
+
+  res.json(result.rows.map((row) => ({
+    ...toUser(row),
+    balance: toBalance(row),
+  })));
+}));
+
+app.post('/api/employees', auth, managerOnly, asyncRoute(async (req, res) => {
   const { name, email, password, department, balance = {} } = req.body;
   const cleanName = String(name || '').trim();
   const cleanEmail = normalizeEmail(email);
   const cleanDepartment = String(department || '').trim();
 
-  if (!cleanName || !cleanEmail || !password || !cleanDepartment)
+  if (!cleanName || !cleanEmail || !password || !cleanDepartment) {
     return res.status(400).json({ error: 'Name, email, password, and department are required' });
+  }
 
-  const db = readDB();
-  if (db.users.some(u => u.email.toLowerCase() === cleanEmail))
-    return res.status(409).json({ error: 'Email already exists' });
+  const employee = await withTransaction(async (client) => {
+    const existing = await client.query('SELECT id FROM users WHERE email = $1', [cleanEmail]);
+    if (existing.rows.length) {
+      const error = new Error('Email already exists');
+      error.status = 409;
+      throw error;
+    }
 
-  const employee = {
-    id: db.nextIds.user++,
-    name: cleanName,
-    email: cleanEmail,
-    password: bcrypt.hashSync(password, 10),
-    role: 'employee',
-    department: cleanDepartment,
-    managerId: req.user.id
-  };
+    const userResult = await client.query(
+      `INSERT INTO users (name, email, password, role, department, manager_id)
+       VALUES ($1, $2, $3, 'employee', $4, $5)
+       RETURNING *`,
+      [cleanName, cleanEmail, bcrypt.hashSync(password, 10), cleanDepartment, req.user.id]
+    );
 
-  const leaveBalance = {
-    userId: employee.id,
-    annual: parseLeaveBalance(balance.annual, 15),
-    sick: parseLeaveBalance(balance.sick, 10),
-    family: parseLeaveBalance(balance.family, 3)
-  };
+    const user = userResult.rows[0];
+    const balanceResult = await client.query(
+      `INSERT INTO leave_balances (user_id, annual, sick, family)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [
+        user.id,
+        parseLeaveBalance(balance.annual, 15),
+        parseLeaveBalance(balance.sick, 10),
+        parseLeaveBalance(balance.family, 3),
+      ]
+    );
 
-  db.users.push(employee);
-  db.leaveBalances.push(leaveBalance);
-  writeDB(db);
+    return { ...toUser(user), balance: toBalance(balanceResult.rows[0]) };
+  });
 
-  res.status(201).json({ ...employee, password: undefined, balance: leaveBalance });
-});
+  res.status(201).json(employee);
+}));
 
-app.put('/api/employees/:id', auth, managerOnly, (req, res) => {
+app.put('/api/employees/:id', auth, managerOnly, asyncRoute(async (req, res) => {
   const employeeId = parseInt(req.params.id);
   const { name, email, password, department, balance = {} } = req.body;
-  const db = readDB();
-  const employee = db.users.find(u => u.id === employeeId && u.role === 'employee' && u.managerId === req.user.id);
-
-  if (!employee) return res.status(404).json({ error: 'Employee not found' });
-
   const cleanName = String(name || '').trim();
   const cleanEmail = normalizeEmail(email);
   const cleanDepartment = String(department || '').trim();
 
-  if (!cleanName || !cleanEmail || !cleanDepartment)
+  if (!cleanName || !cleanEmail || !cleanDepartment) {
     return res.status(400).json({ error: 'Name, email, and department are required' });
-
-  if (db.users.some(u => u.id !== employeeId && u.email.toLowerCase() === cleanEmail))
-    return res.status(409).json({ error: 'Email already exists' });
-
-  employee.name = cleanName;
-  employee.email = cleanEmail;
-  employee.department = cleanDepartment;
-  if (password) employee.password = bcrypt.hashSync(password, 10);
-
-  let leaveBalance = db.leaveBalances.find(b => b.userId === employeeId);
-  if (!leaveBalance) {
-    leaveBalance = { userId: employeeId, annual: 0, sick: 0, family: 0 };
-    db.leaveBalances.push(leaveBalance);
   }
-  leaveBalance.annual = parseLeaveBalance(balance.annual, leaveBalance.annual);
-  leaveBalance.sick = parseLeaveBalance(balance.sick, leaveBalance.sick);
-  leaveBalance.family = parseLeaveBalance(balance.family, leaveBalance.family);
 
-  writeDB(db);
-  res.json({ ...employee, password: undefined, balance: leaveBalance });
-});
+  const employee = await withTransaction(async (client) => {
+    const existing = await client.query(
+      `SELECT id FROM users WHERE email = $1 AND id <> $2`,
+      [cleanEmail, employeeId]
+    );
+    if (existing.rows.length) {
+      const error = new Error('Email already exists');
+      error.status = 409;
+      throw error;
+    }
 
-app.delete('/api/employees/:id', auth, managerOnly, (req, res) => {
+    const current = await client.query(
+      `SELECT * FROM users WHERE id = $1 AND role = 'employee' AND manager_id = $2`,
+      [employeeId, req.user.id]
+    );
+    if (!current.rows.length) {
+      const error = new Error('Employee not found');
+      error.status = 404;
+      throw error;
+    }
+
+    const passwordSql = password ? ', password = $5' : '';
+    const params = password
+      ? [cleanName, cleanEmail, cleanDepartment, employeeId, bcrypt.hashSync(password, 10)]
+      : [cleanName, cleanEmail, cleanDepartment, employeeId];
+
+    const userResult = await client.query(
+      `UPDATE users
+       SET name = $1, email = $2, department = $3${passwordSql}
+       WHERE id = $4
+       RETURNING *`,
+      params
+    );
+
+    const existingBalance = await client.query('SELECT * FROM leave_balances WHERE user_id = $1', [employeeId]);
+    const currentBalance = toBalance(existingBalance.rows[0]);
+    const balanceResult = await client.query(
+      `INSERT INTO leave_balances (user_id, annual, sick, family)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO UPDATE SET
+         annual = EXCLUDED.annual,
+         sick = EXCLUDED.sick,
+         family = EXCLUDED.family
+       RETURNING *`,
+      [
+        employeeId,
+        parseLeaveBalance(balance.annual, currentBalance.annual),
+        parseLeaveBalance(balance.sick, currentBalance.sick),
+        parseLeaveBalance(balance.family, currentBalance.family),
+      ]
+    );
+
+    return { ...toUser(userResult.rows[0]), balance: toBalance(balanceResult.rows[0]) };
+  });
+
+  res.json(employee);
+}));
+
+app.delete('/api/employees/:id', auth, managerOnly, asyncRoute(async (req, res) => {
   const employeeId = parseInt(req.params.id);
-  const db = readDB();
-  const employee = db.users.find(u => u.id === employeeId && u.role === 'employee' && u.managerId === req.user.id);
+  const result = await query(
+    `DELETE FROM users
+     WHERE id = $1 AND role = 'employee' AND manager_id = $2
+     RETURNING id`,
+    [employeeId, req.user.id]
+  );
 
-  if (!employee) return res.status(404).json({ error: 'Employee not found' });
-
-  db.users = db.users.filter(u => u.id !== employeeId);
-  db.leaveBalances = db.leaveBalances.filter(b => b.userId !== employeeId);
-  db.leaveRequests = db.leaveRequests.filter(r => r.userId !== employeeId);
-  writeDB(db);
-
+  if (!result.rows.length) return res.status(404).json({ error: 'Employee not found' });
   res.json({ message: 'Employee deleted' });
-});
+}));
 
-// ─── LEAVE BALANCE ROUTES ─────────────────────────────────────────
-app.get('/api/balance', auth, (req, res) => {
-  const db = readDB();
-  const balance = db.leaveBalances.find(b => b.userId === req.user.id);
-  res.json(balance || { annual: 0, sick: 0, family: 0 });
-});
+app.get('/api/balance', auth, asyncRoute(async (req, res) => {
+  const result = await query('SELECT * FROM leave_balances WHERE user_id = $1', [req.user.id]);
+  res.json(toBalance(result.rows[0]));
+}));
 
-// ─── LEAVE REQUEST ROUTES ─────────────────────────────────────────
-app.get('/api/leaves', auth, (req, res) => {
-  const db = readDB();
-  let requests;
+app.get('/api/leaves', auth, asyncRoute(async (req, res) => {
+  let result;
   if (req.user.role === 'manager') {
-    const empIds = db.users.filter(u => u.managerId === req.user.id).map(u => u.id);
-    requests = db.leaveRequests.filter(r => empIds.includes(r.userId));
-    requests = requests.map(r => {
-      const user = db.users.find(u => u.id === r.userId);
-      return { ...r, employeeName: user?.name, department: user?.department };
-    });
+    result = await query(
+      `SELECT r.*, u.name AS employee_name, u.department
+       FROM leave_requests r
+       JOIN users u ON u.id = r.user_id
+       WHERE u.manager_id = $1
+       ORDER BY r.created_at DESC, r.id DESC`,
+      [req.user.id]
+    );
   } else {
-    requests = db.leaveRequests.filter(r => r.userId === req.user.id);
+    result = await query(
+      `SELECT * FROM leave_requests
+       WHERE user_id = $1
+       ORDER BY created_at DESC, id DESC`,
+      [req.user.id]
+    );
   }
-  requests.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  res.json(requests);
-});
+  res.json(result.rows.map(toLeave));
+}));
 
-app.post('/api/leaves', auth, (req, res) => {
+app.post('/api/leaves', auth, asyncRoute(async (req, res) => {
   if (req.user.role !== 'employee') return res.status(403).json({ error: 'Employees only' });
+
   const { type, startDate, endDate, reason } = req.body;
-  if (!type || !startDate || !endDate || !reason)
-    return res.status(400).json({ error: 'All fields required' });
-  if (!['annual', 'sick', 'family'].includes(type))
-    return res.status(400).json({ error: 'Invalid leave type' });
+  if (!type || !startDate || !endDate || !reason) return res.status(400).json({ error: 'All fields required' });
+  if (!['annual', 'sick', 'family'].includes(type)) return res.status(400).json({ error: 'Invalid leave type' });
 
-  const db = readDB();
-  const balance = db.leaveBalances.find(b => b.userId === req.user.id);
   const days = Math.round((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
-
   if (days <= 0) return res.status(400).json({ error: 'End date must be after start date' });
-  if (!balance) return res.status(400).json({ error: 'Leave balance not found' });
-  if (balance[type] < days) return res.status(400).json({ error: `Insufficient ${type} leave balance` });
 
-  const user = db.users.find(u => u.id === req.user.id);
-  const newRequest = {
-    id: db.nextIds.request++,
-    userId: req.user.id,
-    type, startDate, endDate, days, reason,
-    status: 'pending',
-    createdAt: new Date().toISOString().split('T')[0],
-    managerId: user.managerId,
-    managerComment: ''
-  };
-  db.leaveRequests.push(newRequest);
-  writeDB(db);
-  res.status(201).json(newRequest);
-});
+  const created = await withTransaction(async (client) => {
+    const balanceResult = await client.query('SELECT * FROM leave_balances WHERE user_id = $1', [req.user.id]);
+    const balance = balanceResult.rows[0];
+    if (!balance) {
+      const error = new Error('Leave balance not found');
+      error.status = 400;
+      throw error;
+    }
+    if (balance[type] < days) {
+      const error = new Error(`Insufficient ${type} leave balance`);
+      error.status = 400;
+      throw error;
+    }
 
-app.put('/api/leaves/:id', auth, managerOnly, (req, res) => {
+    const userResult = await client.query('SELECT manager_id FROM users WHERE id = $1', [req.user.id]);
+    const result = await client.query(
+      `INSERT INTO leave_requests (user_id, type, start_date, end_date, days, reason, status, manager_id, manager_comment)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, '')
+       RETURNING *`,
+      [req.user.id, type, startDate, endDate, days, reason, userResult.rows[0]?.manager_id]
+    );
+    return toLeave(result.rows[0]);
+  });
+
+  res.status(201).json(created);
+}));
+
+app.put('/api/leaves/:id', auth, managerOnly, asyncRoute(async (req, res) => {
+  const requestId = parseInt(req.params.id);
   const { status, managerComment } = req.body;
-  if (!['approved', 'rejected'].includes(status))
-    return res.status(400).json({ error: 'Invalid request status' });
+  if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'Invalid request status' });
 
-  const db = readDB();
-  const idx = db.leaveRequests.findIndex(r => r.id === parseInt(req.params.id));
-  if (idx === -1) return res.status(404).json({ error: 'Request not found' });
+  const updated = await withTransaction(async (client) => {
+    const requestResult = await client.query(
+      `SELECT r.*
+       FROM leave_requests r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.id = $1 AND u.manager_id = $2`,
+      [requestId, req.user.id]
+    );
+    const request = requestResult.rows[0];
+    if (!request) {
+      const error = new Error('Request not found');
+      error.status = 404;
+      throw error;
+    }
+    if (request.status !== 'pending') {
+      const error = new Error('Already processed');
+      error.status = 400;
+      throw error;
+    }
 
-  const request = db.leaveRequests[idx];
-  const employee = db.users.find(u => u.id === request.userId);
-  if (!employee || employee.managerId !== req.user.id) return res.status(403).json({ error: 'Not your team member' });
-  if (request.status !== 'pending') return res.status(400).json({ error: 'Already processed' });
+    if (status === 'approved') {
+      const balanceResult = await client.query('SELECT * FROM leave_balances WHERE user_id = $1 FOR UPDATE', [request.user_id]);
+      const balance = balanceResult.rows[0];
+      if (!balance) {
+        const error = new Error('Leave balance not found');
+        error.status = 400;
+        throw error;
+      }
+      if (balance[request.type] < request.days) {
+        const error = new Error(`Insufficient ${request.type} leave balance`);
+        error.status = 400;
+        throw error;
+      }
+      await client.query(
+        `UPDATE leave_balances SET ${request.type} = ${request.type} - $1 WHERE user_id = $2`,
+        [request.days, request.user_id]
+      );
+    }
 
-  if (status === 'approved') {
-    const balance = db.leaveBalances.find(b => b.userId === request.userId);
-    if (!balance) return res.status(400).json({ error: 'Leave balance not found' });
-    if (balance[request.type] < request.days) return res.status(400).json({ error: `Insufficient ${request.type} leave balance` });
-    if (balance) balance[request.type] -= request.days;
-  }
+    const result = await client.query(
+      `UPDATE leave_requests
+       SET status = $1, manager_comment = $2
+       WHERE id = $3
+       RETURNING *`,
+      [status, managerComment || '', requestId]
+    );
+    return toLeave(result.rows[0]);
+  });
 
-  db.leaveRequests[idx] = { ...request, status, managerComment: managerComment || '' };
-  writeDB(db);
-  res.json(db.leaveRequests[idx]);
-});
+  res.json(updated);
+}));
 
-app.delete('/api/leaves/:id', auth, (req, res) => {
-  const db = readDB();
-  const idx = db.leaveRequests.findIndex(r => r.id === parseInt(req.params.id) && r.userId === req.user.id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  if (db.leaveRequests[idx].status !== 'pending') return res.status(400).json({ error: 'Cannot cancel processed request' });
-  db.leaveRequests.splice(idx, 1);
-  writeDB(db);
+app.delete('/api/leaves/:id', auth, asyncRoute(async (req, res) => {
+  const result = await query(
+    `DELETE FROM leave_requests
+     WHERE id = $1 AND user_id = $2 AND status = 'pending'
+     RETURNING id`,
+    [parseInt(req.params.id), req.user.id]
+  );
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Pending request not found' });
   res.json({ message: 'Cancelled' });
-});
+}));
 
-// ─── REPORTS ──────────────────────────────────────────────────────
-app.get('/api/reports', auth, managerOnly, (req, res) => {
-  const db = readDB();
-  const empIds = db.users.filter(u => u.managerId === req.user.id).map(u => u.id);
-  const requests = db.leaveRequests.filter(r => empIds.includes(r.userId));
-  const report = {
-    total: requests.length,
-    pending: requests.filter(r => r.status === 'pending').length,
-    approved: requests.filter(r => r.status === 'approved').length,
-    rejected: requests.filter(r => r.status === 'rejected').length,
+app.get('/api/reports', auth, managerOnly, asyncRoute(async (req, res) => {
+  const stats = await query(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+       COUNT(*) FILTER (WHERE status = 'approved')::int AS approved,
+       COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+       COUNT(*) FILTER (WHERE type = 'annual')::int AS annual,
+       COUNT(*) FILTER (WHERE type = 'sick')::int AS sick,
+       COUNT(*) FILTER (WHERE type = 'family')::int AS family
+     FROM leave_requests r
+     JOIN users u ON u.id = r.user_id
+     WHERE u.manager_id = $1`,
+    [req.user.id]
+  );
+
+  const employees = await query(
+    `SELECT
+       u.name,
+       COUNT(r.id)::int AS total,
+       COUNT(r.id) FILTER (WHERE r.status = 'approved')::int AS approved,
+       COALESCE(SUM(r.days) FILTER (WHERE r.status = 'approved'), 0)::int AS days_used,
+       b.user_id,
+       b.annual,
+       b.sick,
+       b.family
+     FROM users u
+     LEFT JOIN leave_requests r ON r.user_id = u.id
+     LEFT JOIN leave_balances b ON b.user_id = u.id
+     WHERE u.manager_id = $1
+     GROUP BY u.id, b.user_id, b.annual, b.sick, b.family
+     ORDER BY u.name`,
+    [req.user.id]
+  );
+
+  const row = stats.rows[0];
+  res.json({
+    total: row.total,
+    pending: row.pending,
+    approved: row.approved,
+    rejected: row.rejected,
     byType: {
-      annual: requests.filter(r => r.type === 'annual').length,
-      sick: requests.filter(r => r.type === 'sick').length,
-      family: requests.filter(r => r.type === 'family').length,
+      annual: row.annual,
+      sick: row.sick,
+      family: row.family,
     },
-    byEmployee: db.users.filter(u => u.managerId === req.user.id).map(u => {
-      const userRequests = requests.filter(r => r.userId === u.id);
-      const balance = db.leaveBalances.find(b => b.userId === u.id);
-      return {
-        name: u.name,
-        total: userRequests.length,
-        approved: userRequests.filter(r => r.status === 'approved').length,
-        daysUsed: userRequests.filter(r => r.status === 'approved').reduce((s, r) => s + r.days, 0),
-        balance
-      };
-    })
-  };
-  res.json(report);
+    byEmployee: employees.rows.map((employee) => ({
+      name: employee.name,
+      total: employee.total,
+      approved: employee.approved,
+      daysUsed: employee.days_used,
+      balance: toBalance(employee),
+    })),
+  });
+}));
+
+app.use((error, req, res, next) => {
+  console.error(error);
+  res.status(error.status || 500).json({ error: error.message || 'Server error' });
 });
 
 app.listen(PORT, () => console.log(`Leave Management API running on http://localhost:${PORT}`));

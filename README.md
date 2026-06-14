@@ -7,7 +7,7 @@ LeaveFlow is a full-stack leave management system for employees and managers. It
 - **Frontend:** Next.js, React, CSS
 - **Backend:** Node.js, Express.js, REST API
 - **Auth:** JWT authentication with role-based access control
-- **Storage:** JSON file persistence through `db.json`
+- **Database:** PostgreSQL with Neon
 - **Security:** bcrypt password hashing
 
 ## Features
@@ -52,6 +52,22 @@ npm run dev
 
 Open http://localhost:3000.
 
+## Database Setup
+
+Create a free PostgreSQL database on Neon, then copy the pooled connection string into `.env`:
+
+```text
+DATABASE_URL=postgresql://username:password@host/database?sslmode=require
+JWT_SECRET=replace_with_a_long_random_secret
+PORT=3001
+```
+
+Create the tables and demo accounts:
+
+```bash
+npm run db:seed
+```
+
 ## Production Build
 
 Build the Next.js frontend:
@@ -71,6 +87,33 @@ Run the Express API separately with `npm run server`. During local development, 
 ## Deployment Notes
 
 Deploy the Next.js frontend on Vercel and the Express API on a backend host such as Render or Railway.
+
+### Create the Database on Neon
+
+1. Create a Neon project.
+2. Copy the pooled PostgreSQL connection string.
+3. Use that value as `DATABASE_URL` in Render.
+4. Render will run `npm run db:seed` before starting the API.
+
+### Deploy the API on Render
+
+Create a Render Web Service from this GitHub repo. Use these settings if you are not using the included `render.yaml` blueprint:
+
+```text
+Runtime: Node
+Build Command: npm install
+Start Command: npm run server
+Health Check Path: /api/health
+```
+
+Add this environment variable:
+
+```text
+DATABASE_URL=your_neon_connection_string
+JWT_SECRET=your_long_random_secret
+```
+
+Render provides `PORT` automatically, so you do not need to set it there.
 
 After the backend is deployed, add this environment variable in Vercel:
 
@@ -128,8 +171,8 @@ These are the highest-impact next steps to raise the project toward full-stack d
 1. **Move backend logic out of `server.js`**
    Split routes, middleware, services, and database access into separate modules. This makes the backend easier to test and explain in interviews.
 
-2. **Replace JSON storage with a real database**
-   Use PostgreSQL or MySQL with Prisma/Drizzle/Knex. This will demonstrate schema design, migrations, relations, and safer data integrity.
+2. **Add migrations**
+   Replace the seed script's inline schema creation with a migration tool such as Prisma, Drizzle, or node-pg-migrate.
 
 3. **Add validation and tests**
    Add request validation with Zod/Joi and automated API tests with Jest, Vitest, or Supertest.

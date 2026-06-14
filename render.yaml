@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: leaveflow-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run db:seed && npm run server
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true

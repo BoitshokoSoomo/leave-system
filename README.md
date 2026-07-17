@@ -2,6 +2,10 @@
 
 LeaveFlow is a full-stack leave management system for employees and managers. It demonstrates a practical HR workflow with authentication, role-based access, leave balance checks, manager approvals, and reporting.
 
+## Live Demo
+
+[Deploy on Render + Vercel](#deployment-notes) — see [Deployment Notes](#deployment-notes) for setup instructions.
+
 ## Current Stack
 
 - **Frontend:** Next.js, React, CSS
@@ -88,12 +92,14 @@ Run the Express API separately with `npm run server`. During local development, 
 
 Deploy the Next.js frontend on Vercel and the Express API on a backend host such as Render or Railway.
 
-### Create the Database on Neon
+### Free Database: Neon PostgreSQL
 
-1. Create a Neon project.
-2. Copy the pooled PostgreSQL connection string.
-3. Use that value as `DATABASE_URL` in Render.
-4. Render will run `npm run db:seed` before starting the API.
+Neon provides a free PostgreSQL database with 0.5 GB storage — perfect for this project.
+
+1. Sign up at [neon.tech](https://neon.tech) (free, no credit card)
+2. Create a new project
+3. Copy the **pooled** connection string (looks like `postgresql://...@ep-xxx.us-east-2.aws.neon.tech/dbname?sslmode=require`)
+4. Use that value as `DATABASE_URL` in your `.env` (local) or Render environment variables (production)
 
 ### Deploy the API on Render
 
@@ -106,7 +112,7 @@ Start Command: npm run server
 Health Check Path: /api/health
 ```
 
-Add this environment variable:
+Add these environment variables:
 
 ```text
 DATABASE_URL=your_neon_connection_string
@@ -115,7 +121,11 @@ JWT_SECRET=your_long_random_secret
 
 Render provides `PORT` automatically, so you do not need to set it there.
 
-After the backend is deployed, add this environment variable in Vercel:
+### Deploy the Frontend on Vercel
+
+1. Import the repo on [vercel.com](https://vercel.com)
+2. Vercel auto-detects Next.js — no config needed
+3. Add this environment variable:
 
 ```text
 NEXT_PUBLIC_API_URL=https://your-backend-url.onrender.com
@@ -134,15 +144,19 @@ For local development you can leave it unset because Next.js rewrites `/api/*` t
 
 ```text
 leave-system/
-|-- server.js          # Express API and JSON persistence
+|-- server.js          # Express API and PostgreSQL database access
+|-- db.js              # PostgreSQL connection pool and helpers
 |-- next.config.js     # Next.js config and API rewrite
+|-- render.yaml        # Render.com deployment blueprint
+|-- .env.example       # Environment variable template
+|-- scripts/
+|   `-- seed.js        # Database schema creation + demo data
 |-- app/
 |   |-- layout.jsx     # Root layout and global CSS import
 |   |-- page.jsx       # Home route that renders the app
 |   `-- globals.css    # Application styling
 |-- src/
-|   |-- App.jsx        # React application views and state
-|-- public/
+|   `-- App.jsx        # React application views and state
 |-- package.json
 `-- README.md
 ```
@@ -186,9 +200,6 @@ These are the highest-impact next steps to raise the project toward full-stack d
 6. **Add HR/admin workflows**
    Add employee creation, manager assignment, leave policy configuration, public holidays, and annual leave accrual.
 
-7. **Add deployment readiness**
-   Add environment examples, build instructions, seed scripts, and a deployment target such as Render, Railway, Fly.io, or Azure.
-
 ## Author
 
-Boitshoko Soomo | github.com/BoitshokoSoomo
+Boitshoko Soomo | [GitHub](https://github.com/BoitshokoSoomo) | [LinkedIn](https://linkedin.com/in/boitshoko-soomo-13a0b7220)
